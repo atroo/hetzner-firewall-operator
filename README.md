@@ -49,7 +49,7 @@ The following ports are managed for an RKE2 + Cilium cluster:
 ### Quick Start
 
 ```bash
-helm install hetzner-fw ./deploy/chart \
+helm install hetzner-fw ./charts/hetzner-firewall-operator \
   -n hetzner-firewall-operator --create-namespace \
   --set hcloudToken=YOUR_HCLOUD_TOKEN \
   --set operator.firewallName=my-cluster \
@@ -65,7 +65,7 @@ kubectl create secret generic hcloud-credentials \
   -n hetzner-firewall-operator \
   --from-literal=HCLOUD_TOKEN=YOUR_TOKEN
 
-helm install hetzner-fw ./deploy/chart \
+helm install hetzner-fw ./charts/hetzner-firewall-operator \
   -n hetzner-firewall-operator --create-namespace \
   --set existingSecret=hcloud-credentials
 ```
@@ -75,7 +75,7 @@ helm install hetzner-fw ./deploy/chart \
 To deploy both Hetzner Cloud Firewall management and Cilium Host Firewall policies:
 
 ```bash
-helm install hetzner-fw ./deploy/chart \
+helm install hetzner-fw ./charts/hetzner-firewall-operator \
   -n hetzner-firewall-operator --create-namespace \
   --set hcloudToken=YOUR_HCLOUD_TOKEN \
   --set 'operator.allowSSHFrom={YOUR_IP/32}' \
