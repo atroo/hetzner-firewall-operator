@@ -1,0 +1,25 @@
+{{- if and .Values.ciliumPolicies.enabled .Values.ciliumPolicies.defaultDeny }}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: {{ include "hetzner-firewall-operator.fullname" . }}-host-default-deny
+  labels:
+    {{- include "hetzner-firewall-operator.labels" . | nindent 4 }}
+spec:
+  description: "Default deny all host ingress traffic. Allow policies whitelist specific ports."
+  nodeSelector:
+    matchLabels:
+      {{- if .Values.ciliumPolicies.allNodesSelector }}
+      {{- toYaml .Values.ciliumPolicies.allNodesSelector | nindent 6 }}
+      {{- else }}
+      kubernetes.io/os: linux
+      {{- end }}
+  ingress:
+    # Allow all pod-to-host traffic (kube-proxy, local health checks, etc.)
+    - fromEntities:
+        - host
+    # Allow localhost
+    - fromCIDR:
+        - "127.0.0.1/32"
+        - "::1/128"
+{{- end }}

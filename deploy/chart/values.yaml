@@ -1,0 +1,108 @@
+image:
+  repository: ghcr.io/atroo/hetzner-firewall-operator
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Number of replicas. >1 enables HA with leader election.
+replicaCount: 2
+
+# Hetzner Cloud API token. Required.
+# Can be provided inline or via an existing secret.
+hcloudToken: ""
+
+# Reference an existing secret containing the HCLOUD_TOKEN key.
+# If set, hcloudToken above is ignored.
+existingSecret: ""
+
+# Operator configuration (maps to CLI flags)
+operator:
+  # Name of the Hetzner Cloud Firewall to create/manage.
+  firewallName: "k8s-cluster"
+
+  # How often to run a full reconciliation (Go duration).
+  reconcileInterval: "5m"
+
+  # Expose NodePort range (30000-32767) to the public internet.
+  # If false, NodePort range is only accessible from cluster node IPs.
+  nodePortPublic: false
+
+  # CIDRs allowed to SSH into nodes. Empty list = no SSH rule.
+  # Example: ["1.2.3.4/32", "10.0.0.0/8"]
+  allowSSHFrom: []
+
+  # Kubernetes label selector to filter which nodes are considered.
+  # Empty string = all nodes.
+  labelSelector: ""
+
+  # Address for the metrics endpoint.
+  metricsAddr: ":8080"
+
+  # Address for the health probe endpoint.
+  healthAddr: ":8081"
+
+# Leader election settings
+leaderElection:
+  enabled: true
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+podAnnotations: {}
+
+podLabels: {}
+
+serviceAccount:
+  # Create a service account (set to false if using an existing one)
+  create: true
+  # Name override. Defaults to the release fullname.
+  name: ""
+  annotations: {}
+
+rbac:
+  # Create ClusterRole and ClusterRoleBinding
+  create: true
+
+serviceMonitor:
+  # Create a Prometheus ServiceMonitor resource
+  enabled: false
+  interval: "60s"
+  labels: {}
+
+# Cilium Host Firewall policies (CiliumClusterwideNetworkPolicy).
+# These enforce the same port rules at the kernel level using eBPF,
+# complementing the Hetzner Cloud Firewall (edge-level).
+ciliumPolicies:
+  # Deploy CiliumClusterwideNetworkPolicy resources.
+  enabled: false
+
+  # Deploy a default-deny ingress policy for host traffic.
+  # WARNING: Only enable this if all required allow policies are in place,
+  # otherwise you will lock yourself out of the nodes.
+  defaultDeny: false
+
+  # Allow external access to the Kubernetes API (6443) from the internet.
+  # If false, only cluster nodes can reach the API server.
+  apiServerPublic: false
+
+  # Node selector for all-node policies. Defaults to kubernetes.io/os: linux.
+  # Override if your cluster uses different labels.
+  allNodesSelector: {}
+  #   kubernetes.io/os: linux
+
+  # Node selector for control-plane-only policies (etcd).
+  # Must match your control-plane nodes.
+  controlPlaneSelector: {}
+  #   node-role.kubernetes.io/control-plane: "true"

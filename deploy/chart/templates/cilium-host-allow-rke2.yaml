@@ -1,0 +1,81 @@
+{{- if .Values.ciliumPolicies.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: {{ include "hetzner-firewall-operator.fullname" . }}-host-rke2
+  labels:
+    {{- include "hetzner-firewall-operator.labels" . | nindent 4 }}
+spec:
+  description: "Allow RKE2 + Cilium intra-cluster traffic on all nodes"
+  nodeSelector:
+    matchLabels:
+      {{- if .Values.ciliumPolicies.allNodesSelector }}
+      {{- toYaml .Values.ciliumPolicies.allNodesSelector | nindent 6 }}
+      {{- else }}
+      kubernetes.io/os: linux
+      {{- end }}
+  ingress:
+    # RKE2 supervisor API (node registration)
+    - fromEntities:
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "9345"
+              protocol: TCP
+    # Kubernetes API server
+    - fromEntities:
+        - remote-node
+        - health
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    {{- if .Values.ciliumPolicies.apiServerPublic }}
+    # Kubernetes API server - external access
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "6443"
+              protocol: TCP
+    {{- end }}
+    # Cilium VXLAN overlay
+    - fromEntities:
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "8472"
+              protocol: UDP
+    # kubelet API
+    - fromEntities:
+        - remote-node
+        - health
+      toPorts:
+        - ports:
+            - port: "10250"
+              protocol: TCP
+    # Cilium health checks
+    - fromEntities:
+        - remote-node
+        - health
+      toPorts:
+        - ports:
+            - port: "4240"
+              protocol: TCP
+    # Hubble Relay
+    - fromEntities:
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "4245"
+              protocol: TCP
+    # ICMP (ping, PMTUD)
+    - fromEntities:
+        - remote-node
+      icmps:
+        - fields:
+            - type: 8
+              family: IPv4
+            - type: 128
+              family: IPv6
+{{- end }}

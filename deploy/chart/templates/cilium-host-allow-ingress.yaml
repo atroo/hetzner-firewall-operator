@@ -1,0 +1,26 @@
+{{- if .Values.ciliumPolicies.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: {{ include "hetzner-firewall-operator.fullname" . }}-host-ingress
+  labels:
+    {{- include "hetzner-firewall-operator.labels" . | nindent 4 }}
+spec:
+  description: "Allow public HTTP/HTTPS ingress to all nodes"
+  nodeSelector:
+    matchLabels:
+      {{- if .Values.ciliumPolicies.allNodesSelector }}
+      {{- toYaml .Values.ciliumPolicies.allNodesSelector | nindent 6 }}
+      {{- else }}
+      kubernetes.io/os: linux
+      {{- end }}
+  ingress:
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+            - port: "443"
+              protocol: TCP
+{{- end }}

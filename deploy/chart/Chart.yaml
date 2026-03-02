@@ -1,0 +1,6 @@
+apiVersion: v2
+name: hetzner-firewall-operator
+description: Kubernetes operator that manages Hetzner Cloud Firewall rules based on cluster node IPs
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

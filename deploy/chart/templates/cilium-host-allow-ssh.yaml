@@ -1,0 +1,26 @@
+{{- if and .Values.ciliumPolicies.enabled .Values.operator.allowSSHFrom }}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: {{ include "hetzner-firewall-operator.fullname" . }}-host-ssh
+  labels:
+    {{- include "hetzner-firewall-operator.labels" . | nindent 4 }}
+spec:
+  description: "Allow SSH access from configured CIDRs"
+  nodeSelector:
+    matchLabels:
+      {{- if .Values.ciliumPolicies.allNodesSelector }}
+      {{- toYaml .Values.ciliumPolicies.allNodesSelector | nindent 6 }}
+      {{- else }}
+      kubernetes.io/os: linux
+      {{- end }}
+  ingress:
+    - fromCIDR:
+        {{- range .Values.operator.allowSSHFrom }}
+        - {{ . | quote }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "22"
+              protocol: TCP
+{{- end }}

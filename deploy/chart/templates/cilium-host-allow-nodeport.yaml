@@ -1,0 +1,32 @@
+{{- if .Values.ciliumPolicies.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: {{ include "hetzner-firewall-operator.fullname" . }}-host-nodeport
+  labels:
+    {{- include "hetzner-firewall-operator.labels" . | nindent 4 }}
+spec:
+  description: "Allow NodePort range traffic"
+  nodeSelector:
+    matchLabels:
+      {{- if .Values.ciliumPolicies.allNodesSelector }}
+      {{- toYaml .Values.ciliumPolicies.allNodesSelector | nindent 6 }}
+      {{- else }}
+      kubernetes.io/os: linux
+      {{- end }}
+  ingress:
+    - fromEntities:
+        {{- if .Values.operator.nodePortPublic }}
+        - world
+        {{- else }}
+        - remote-node
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "30000"
+              endPort: 32767
+              protocol: TCP
+            - port: "30000"
+              endPort: 32767
+              protocol: UDP
+{{- end }}

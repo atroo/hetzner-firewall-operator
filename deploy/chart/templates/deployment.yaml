@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hetzner-firewall-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "hetzner-firewall-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "hetzner-firewall-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hetzner-firewall-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "hetzner-firewall-operator.serviceAccountName" . }}
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --firewall-name={{ .Values.operator.firewallName }}
+            - --reconcile-interval={{ .Values.operator.reconcileInterval }}
+            - --metrics-addr={{ .Values.operator.metricsAddr }}
+            {{- if .Values.operator.nodePortPublic }}
+            - --nodeport-public
+            {{- end }}
+            {{- if .Values.operator.allowSSHFrom }}
+            - --allow-ssh-from={{ join "," .Values.operator.allowSSHFrom }}
+            {{- end }}
+            {{- if .Values.operator.labelSelector }}
+            - --label-selector={{ .Values.operator.labelSelector }}
+            {{- end }}
+          env:
+            - name: HCLOUD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hetzner-firewall-operator.secretName" . }}
+                  key: HCLOUD_TOKEN
+          ports:
+            - name: metrics
+              containerPort: {{ (split ":" .Values.operator.metricsAddr)._1 | default 8080 }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ (split ":" .Values.operator.healthAddr)._1 | default 8081 }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

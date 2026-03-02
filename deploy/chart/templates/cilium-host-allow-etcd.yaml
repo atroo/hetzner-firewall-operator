@@ -1,0 +1,32 @@
+{{- if .Values.ciliumPolicies.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: {{ include "hetzner-firewall-operator.fullname" . }}-host-etcd
+  labels:
+    {{- include "hetzner-firewall-operator.labels" . | nindent 4 }}
+spec:
+  description: "Allow etcd traffic only between control-plane nodes"
+  nodeSelector:
+    matchLabels:
+      {{- if .Values.ciliumPolicies.controlPlaneSelector }}
+      {{- toYaml .Values.ciliumPolicies.controlPlaneSelector | nindent 6 }}
+      {{- else }}
+      node-role.kubernetes.io/control-plane: "true"
+      {{- end }}
+  ingress:
+    # etcd client requests
+    - fromEntities:
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "2379"
+              protocol: TCP
+    # etcd peer communication
+    - fromEntities:
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "2380"
+              protocol: TCP
+{{- end }}
