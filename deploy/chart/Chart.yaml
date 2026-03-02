@@ -4,3 +4,15 @@ description: Kubernetes operator that manages Hetzner Cloud Firewall rules based
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+keywords:
+  - hetzner
+  - firewall
+  - kubernetes
+  - operator
+  - rke2
+  - cilium
+home: https://github.com/atroo/hetzner-firewall-operator
+sources:
+  - https://github.com/atroo/hetzner-firewall-operator
+maintainers:
+  - name: atroo

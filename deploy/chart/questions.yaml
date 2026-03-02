@@ -1,0 +1,102 @@
+questions:
+  # --- Authentication ---
+  - variable: hcloudToken
+    label: Hetzner Cloud API Token
+    description: "API token with read/write permissions. Leave empty if using an existing secret."
+    type: password
+    required: false
+    group: "Authentication"
+
+  - variable: existingSecret
+    label: Existing Secret Name
+    description: "Name of an existing Secret containing a HCLOUD_TOKEN key. Overrides hcloudToken."
+    type: string
+    default: ""
+    group: "Authentication"
+
+  # --- Operator Configuration ---
+  - variable: operator.firewallName
+    label: Firewall Name
+    description: "Name of the Hetzner Cloud Firewall to create and manage."
+    type: string
+    default: "k8s-cluster"
+    required: true
+    group: "Operator"
+
+  - variable: operator.reconcileInterval
+    label: Reconcile Interval
+    description: "How often to run a full reconciliation (Go duration, e.g. 5m, 10m)."
+    type: string
+    default: "5m"
+    group: "Operator"
+
+  - variable: operator.allowSSHFrom
+    label: Allow SSH From
+    description: "Comma-separated CIDRs for SSH access (e.g. 1.2.3.4/32,10.0.0.0/8). Empty = no SSH rule."
+    type: string
+    default: ""
+    group: "Operator"
+
+  - variable: operator.nodePortPublic
+    label: NodePort Public
+    description: "Expose NodePort range (30000-32767) to the internet."
+    type: boolean
+    default: false
+    group: "Operator"
+
+  - variable: operator.labelSelector
+    label: Node Label Selector
+    description: "Only consider nodes matching this label selector. Empty = all nodes."
+    type: string
+    default: ""
+    group: "Operator"
+
+  # --- Deployment ---
+  - variable: replicaCount
+    label: Replicas
+    description: "Number of operator replicas. >1 enables HA via leader election."
+    type: int
+    default: 2
+    min: 1
+    max: 3
+    group: "Deployment"
+
+  - variable: image.repository
+    label: Image Repository
+    type: string
+    default: "ghcr.io/atroo/hetzner-firewall-operator"
+    group: "Deployment"
+
+  - variable: image.tag
+    label: Image Tag
+    type: string
+    default: "latest"
+    group: "Deployment"
+
+  # --- Cilium Policies ---
+  - variable: ciliumPolicies.enabled
+    label: Enable Cilium Host Firewall Policies
+    description: "Deploy CiliumClusterwideNetworkPolicy resources for kernel-level port filtering."
+    type: boolean
+    default: false
+    group: "Cilium Policies"
+    show_subquestion_if: true
+    subquestions:
+      - variable: ciliumPolicies.defaultDeny
+        label: Default Deny
+        description: "Deploy a default-deny host ingress policy. WARNING: will block all non-whitelisted traffic."
+        type: boolean
+        default: false
+      - variable: ciliumPolicies.apiServerPublic
+        label: API Server Public
+        description: "Allow external access to Kubernetes API (port 6443)."
+        type: boolean
+        default: false
+
+  # --- Monitoring ---
+  - variable: serviceMonitor.enabled
+    label: Enable ServiceMonitor
+    description: "Create a Prometheus ServiceMonitor for metrics scraping."
+    type: boolean
+    default: false
+    group: "Monitoring"
