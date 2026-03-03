@@ -80,6 +80,17 @@ questions:
     default: "latest"
     group: "Deployment"
 
+  - variable: image.pullPolicy
+    label: Image Pull Policy
+    description: "When to pull the container image."
+    type: enum
+    default: "IfNotPresent"
+    options:
+      - "Always"
+      - "IfNotPresent"
+      - "Never"
+    group: "Deployment"
+
   # --- Cilium Policies ---
   - variable: ciliumPolicies.enabled
     label: Enable Cilium Host Firewall Policies
