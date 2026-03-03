@@ -23,9 +23,10 @@ import (
 // NodeReconciler watches Kubernetes nodes and reconciles Hetzner firewall rules.
 type NodeReconciler struct {
 	client.Client
-	fwClient *firewall.Client
-	cfg      config.Config
-	logger   *slog.Logger
+	fwClient       *firewall.Client
+	serverResolver firewall.ServerResolver
+	cfg            config.Config
+	logger         *slog.Logger
 
 	// lastReconcile tracks the last successful reconciliation time
 	// to implement rate limiting.
@@ -36,14 +37,16 @@ type NodeReconciler struct {
 func NewNodeReconciler(
 	k8sClient client.Client,
 	fwClient *firewall.Client,
+	serverResolver firewall.ServerResolver,
 	cfg config.Config,
 	logger *slog.Logger,
 ) *NodeReconciler {
 	return &NodeReconciler{
-		Client:   k8sClient,
-		fwClient: fwClient,
-		cfg:      cfg,
-		logger:   logger,
+		Client:         k8sClient,
+		fwClient:       fwClient,
+		serverResolver: serverResolver,
+		cfg:            cfg,
+		logger:         logger,
 	}
 }
 
@@ -72,7 +75,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req reconcile.Request) (
 	}
 
 	// Convert K8s nodes to NodeInfo
-	nodes, err := r.extractNodeInfos(nodeList.Items)
+	nodes, err := r.extractNodeInfos(ctx, nodeList.Items)
 	if err != nil {
 		r.logger.Error("failed to extract node info", "error", err)
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, err
@@ -101,55 +104,99 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req reconcile.Request) (
 	return reconcile.Result{RequeueAfter: r.cfg.ReconcileInterval}, nil
 }
 
-// extractNodeInfos converts K8s Node objects to firewall.NodeInfo.
-func (r *NodeReconciler) extractNodeInfos(nodes []corev1.Node) ([]firewall.NodeInfo, error) {
+// extractNodeInfos converts K8s Node objects to firewall.NodeInfo using a two-pass approach:
+// Pass 1 parses hcloud:// provider IDs (existing behavior).
+// Pass 2 batch-resolves remaining nodes via the Hetzner API (for RKE2 without HCCM).
+func (r *NodeReconciler) extractNodeInfos(ctx context.Context, nodes []corev1.Node) ([]firewall.NodeInfo, error) {
 	var infos []firewall.NodeInfo
+	var unresolvedNodes []corev1.Node
 
+	// Pass 1: parse hcloud:// provider IDs
 	for _, node := range nodes {
-		// Extract Hetzner server ID from providerID
-		// Format: hcloud://SERVER_ID
 		serverID, err := parseHetznerProviderID(node.Spec.ProviderID)
 		if err != nil {
-			r.logger.Debug("skipping node without Hetzner provider ID",
-				"node", node.Name,
-				"providerID", node.Spec.ProviderID,
-			)
+			unresolvedNodes = append(unresolvedNodes, node)
 			continue
 		}
 
-		info := firewall.NodeInfo{
-			Name:     node.Name,
-			ServerID: serverID,
-			IsServer: isControlPlaneNode(&node),
+		if info, ok := r.buildNodeInfo(&node, serverID); ok {
+			infos = append(infos, info)
+		}
+	}
+
+	// Pass 2: batch-resolve remaining nodes via server resolver
+	if len(unresolvedNodes) > 0 && r.serverResolver != nil {
+		names := make([]string, len(unresolvedNodes))
+		for i, n := range unresolvedNodes {
+			names[i] = n.Name
 		}
 
-		// Extract IPs from node addresses
-		for _, addr := range node.Status.Addresses {
-			if addr.Type == corev1.NodeExternalIP || addr.Type == corev1.NodeInternalIP {
-				ip := net.ParseIP(addr.Address)
-				if ip == nil {
+		resolved, err := r.serverResolver.ResolveServerIDs(ctx, names)
+		if err != nil {
+			r.logger.Warn("failed to resolve server IDs via Hetzner API, skipping unresolved nodes",
+				"error", err,
+				"nodeCount", len(unresolvedNodes),
+			)
+		} else {
+			for i := range unresolvedNodes {
+				node := &unresolvedNodes[i]
+				serverID, ok := resolved[node.Name]
+				if !ok {
+					r.logger.Warn("could not resolve Hetzner server ID for node",
+						"node", node.Name,
+						"providerID", node.Spec.ProviderID,
+					)
 					continue
 				}
-				if ip.To4() != nil {
-					info.IPv4 = ip
-				} else {
-					// For IPv6, Hetzner assigns a /64 network
-					info.IPv6Net = &net.IPNet{
-						IP:   ip,
-						Mask: net.CIDRMask(64, 128),
-					}
+
+				if info, ok := r.buildNodeInfo(node, serverID); ok {
+					infos = append(infos, info)
 				}
 			}
 		}
-
-		if info.IPv4 != nil || info.IPv6Net != nil {
-			infos = append(infos, info)
-		} else {
-			r.logger.Warn("node has no usable IP addresses", "node", node.Name)
+	} else if len(unresolvedNodes) > 0 {
+		for _, node := range unresolvedNodes {
+			r.logger.Debug("skipping node without Hetzner provider ID (no server resolver configured)",
+				"node", node.Name,
+				"providerID", node.Spec.ProviderID,
+			)
 		}
 	}
 
 	return infos, nil
+}
+
+// buildNodeInfo extracts IP addresses from a K8s node and builds a NodeInfo.
+// Returns false if the node has no usable IP addresses.
+func (r *NodeReconciler) buildNodeInfo(node *corev1.Node, serverID int64) (firewall.NodeInfo, bool) {
+	info := firewall.NodeInfo{
+		Name:     node.Name,
+		ServerID: serverID,
+		IsServer: isControlPlaneNode(node),
+	}
+
+	for _, addr := range node.Status.Addresses {
+		if addr.Type == corev1.NodeExternalIP || addr.Type == corev1.NodeInternalIP {
+			ip := net.ParseIP(addr.Address)
+			if ip == nil {
+				continue
+			}
+			if ip.To4() != nil {
+				info.IPv4 = ip
+			} else {
+				info.IPv6Net = &net.IPNet{
+					IP:   ip,
+					Mask: net.CIDRMask(64, 128),
+				}
+			}
+		}
+	}
+
+	if info.IPv4 != nil || info.IPv6Net != nil {
+		return info, true
+	}
+	r.logger.Warn("node has no usable IP addresses", "node", node.Name)
+	return info, false
 }
 
 // SetupWithManager registers the controller with the manager.

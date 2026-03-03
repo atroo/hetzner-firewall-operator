@@ -97,6 +97,7 @@ func main() {
 	reconciler := controller.NewNodeReconciler(
 		mgr.GetClient(),
 		fwClient,
+		fwClient, // also serves as ServerResolver for RKE2 fallback
 		cfg,
 		logger,
 	)

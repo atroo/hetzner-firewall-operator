@@ -21,6 +21,12 @@ type NodeInfo struct {
 	IsServer   bool       // true if control-plane node
 }
 
+// ServerResolver resolves Hetzner server IDs for nodes that don't have
+// an hcloud:// provider ID (e.g. RKE2 without HCCM).
+type ServerResolver interface {
+	ResolveServerIDs(ctx context.Context, names []string) (map[string]int64, error)
+}
+
 // Client wraps the Hetzner Cloud API for firewall operations.
 type Client struct {
 	hcloud *hcloud.Client
@@ -35,6 +41,32 @@ func NewClient(hcloudClient *hcloud.Client, cfg config.Config, logger *slog.Logg
 		logger: logger,
 		cfg:    cfg,
 	}
+}
+
+// ResolveServerIDs resolves Hetzner server IDs by matching node names against
+// all servers from the Hetzner API. One API call per invocation.
+func (c *Client) ResolveServerIDs(ctx context.Context, names []string) (map[string]int64, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+
+	servers, err := c.hcloud.Server.All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list servers from Hetzner API: %w", err)
+	}
+
+	nameSet := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+
+	result := make(map[string]int64)
+	for _, s := range servers {
+		if _, ok := nameSet[s.Name]; ok {
+			result[s.Name] = s.ID
+		}
+	}
+	return result, nil
 }
 
 // EnsureFirewall creates the managed firewall if it doesn't exist and returns it.

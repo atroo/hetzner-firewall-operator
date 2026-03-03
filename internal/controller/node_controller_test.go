@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -10,6 +12,19 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// mockResolver implements firewall.ServerResolver for testing.
+type mockResolver struct {
+	result map[string]int64
+	err    error
+}
+
+func (m *mockResolver) ResolveServerIDs(_ context.Context, names []string) (map[string]int64, error) {
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.result, nil
+}
 
 func TestParseHetznerProviderID(t *testing.T) {
 	tests := []struct {
@@ -265,7 +280,7 @@ func TestExtractNodeInfos(t *testing.T) {
 				},
 			},
 		},
-		// Non-Hetzner node should be skipped
+		// Non-Hetzner node should be skipped (no resolver)
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "aws-node"},
 			Spec:       corev1.NodeSpec{ProviderID: "aws://i-12345"},
@@ -277,7 +292,7 @@ func TestExtractNodeInfos(t *testing.T) {
 		},
 	}
 
-	infos, err := r.extractNodeInfos(nodes)
+	infos, err := r.extractNodeInfos(context.Background(), nodes)
 	if err != nil {
 		t.Fatalf("extractNodeInfos() error = %v", err)
 	}
@@ -303,5 +318,241 @@ func TestExtractNodeInfos(t *testing.T) {
 	}
 	if infos[1].IPv6Net == nil {
 		t.Error("worker-1 should have IPv6Net")
+	}
+}
+
+func TestExtractNodeInfos_RKE2Nodes(t *testing.T) {
+	resolver := &mockResolver{
+		result: map[string]int64{
+			"rke2-server-1": 444,
+			"rke2-worker-1": 555,
+		},
+	}
+	r := &NodeReconciler{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serverResolver: resolver,
+	}
+
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "rke2-server-1",
+				Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""},
+			},
+			Spec: corev1.NodeSpec{ProviderID: "rke2://rke2-server-1"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "10.0.0.1"},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "rke2-worker-1",
+				Labels: map[string]string{},
+			},
+			Spec: corev1.NodeSpec{ProviderID: "rke2://rke2-worker-1"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "10.0.0.2"},
+				},
+			},
+		},
+	}
+
+	infos, err := r.extractNodeInfos(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() error = %v", err)
+	}
+
+	if len(infos) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(infos))
+	}
+
+	if infos[0].Name != "rke2-server-1" || infos[0].ServerID != 444 || !infos[0].IsServer {
+		t.Errorf("rke2-server-1: got %+v", infos[0])
+	}
+	if infos[1].Name != "rke2-worker-1" || infos[1].ServerID != 555 || infos[1].IsServer {
+		t.Errorf("rke2-worker-1: got %+v", infos[1])
+	}
+}
+
+func TestExtractNodeInfos_MixedHCloudAndRKE2(t *testing.T) {
+	resolver := &mockResolver{
+		result: map[string]int64{
+			"rke2-node": 666,
+		},
+	}
+	r := &NodeReconciler{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serverResolver: resolver,
+	}
+
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "hcloud-node", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "hcloud://111"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "1.2.3.4"},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "rke2-node", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "rke2://rke2-node"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "5.6.7.8"},
+				},
+			},
+		},
+	}
+
+	infos, err := r.extractNodeInfos(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() error = %v", err)
+	}
+
+	if len(infos) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(infos))
+	}
+
+	if infos[0].Name != "hcloud-node" || infos[0].ServerID != 111 {
+		t.Errorf("hcloud-node: got %+v", infos[0])
+	}
+	if infos[1].Name != "rke2-node" || infos[1].ServerID != 666 {
+		t.Errorf("rke2-node: got %+v", infos[1])
+	}
+}
+
+func TestExtractNodeInfos_ResolverError(t *testing.T) {
+	resolver := &mockResolver{
+		err: fmt.Errorf("API error"),
+	}
+	r := &NodeReconciler{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serverResolver: resolver,
+	}
+
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "hcloud-node", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "hcloud://111"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "1.2.3.4"},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "rke2-node", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "rke2://rke2-node"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "5.6.7.8"},
+				},
+			},
+		},
+	}
+
+	infos, err := r.extractNodeInfos(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() should not return error on resolver failure, got %v", err)
+	}
+
+	// Only the hcloud node should be present; rke2-node skipped due to resolver error
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 node (graceful degradation), got %d", len(infos))
+	}
+	if infos[0].Name != "hcloud-node" {
+		t.Errorf("expected hcloud-node, got %s", infos[0].Name)
+	}
+}
+
+func TestExtractNodeInfos_PartialResolution(t *testing.T) {
+	resolver := &mockResolver{
+		result: map[string]int64{
+			"rke2-node-1": 777,
+			// rke2-node-2 is NOT resolved
+		},
+	}
+	r := &NodeReconciler{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serverResolver: resolver,
+	}
+
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "rke2-node-1", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "rke2://rke2-node-1"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "10.0.0.1"},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "rke2-node-2", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "rke2://rke2-node-2"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "10.0.0.2"},
+				},
+			},
+		},
+	}
+
+	infos, err := r.extractNodeInfos(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() error = %v", err)
+	}
+
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 resolved node, got %d", len(infos))
+	}
+	if infos[0].Name != "rke2-node-1" || infos[0].ServerID != 777 {
+		t.Errorf("rke2-node-1: got %+v", infos[0])
+	}
+}
+
+func TestExtractNodeInfos_NilResolver(t *testing.T) {
+	r := &NodeReconciler{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serverResolver: nil,
+	}
+
+	nodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "rke2-node", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "rke2://rke2-node"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "10.0.0.1"},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "hcloud-node", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "hcloud://111"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "1.2.3.4"},
+				},
+			},
+		},
+	}
+
+	infos, err := r.extractNodeInfos(context.Background(), nodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() error = %v", err)
+	}
+
+	// Only the hcloud node; rke2 node silently skipped with nil resolver
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 node with nil resolver, got %d", len(infos))
+	}
+	if infos[0].Name != "hcloud-node" {
+		t.Errorf("expected hcloud-node, got %s", infos[0].Name)
 	}
 }
