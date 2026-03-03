@@ -52,6 +52,13 @@ questions:
     group: "Operator"
 
   # --- Deployment ---
+  - variable: imagePullSecrets
+    label: Image Pull Secrets
+    description: "Select existing secrets for pulling images from private registries."
+    type: secret
+    default: ""
+    group: "Deployment"
+
   - variable: replicaCount
     label: Replicas
     description: "Number of operator replicas. >1 enables HA via leader election."
