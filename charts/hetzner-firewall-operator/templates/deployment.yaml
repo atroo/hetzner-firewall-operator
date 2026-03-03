@@ -22,9 +22,13 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      {{- with .Values.imagePullSecrets }}
+      {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- if kindIs "string" .Values.imagePullSecrets }}
+        - name: {{ .Values.imagePullSecrets }}
+        {{- else }}
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+        {{- end }}
       {{- end }}
       serviceAccountName: {{ include "hetzner-firewall-operator.serviceAccountName" . }}
       containers:
