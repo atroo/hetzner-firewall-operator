@@ -184,9 +184,10 @@ func (r *NodeReconciler) buildNodeInfo(node *corev1.Node, serverID int64) (firew
 			if ip.To4() != nil {
 				info.IPv4 = ip
 			} else {
+				mask := net.CIDRMask(64, 128)
 				info.IPv6Net = &net.IPNet{
-					IP:   ip,
-					Mask: net.CIDRMask(64, 128),
+					IP:   ip.Mask(mask),
+					Mask: mask,
 				}
 			}
 		}

@@ -39,6 +39,7 @@ spec:
             - --firewall-name={{ .Values.operator.firewallName }}
             - --reconcile-interval={{ .Values.operator.reconcileInterval }}
             - --metrics-addr={{ .Values.operator.metricsAddr }}
+            - --health-addr={{ .Values.operator.healthAddr }}
             {{- if .Values.operator.nodePortPublic }}
             - --nodeport-public
             {{- end }}

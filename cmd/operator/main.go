@@ -12,6 +12,7 @@ import (
 	"github.com/atroo/hetzner-firewall-operator/internal/firewall"
 	"github.com/hetznercloud/hcloud-go/v2/hcloud"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -23,6 +24,7 @@ func main() {
 		allowSSH          string
 		nodePortPublic    bool
 		metricsAddr       string
+		healthAddr        string
 		labelSelector     string
 	)
 
@@ -31,6 +33,7 @@ func main() {
 	flag.StringVar(&allowSSH, "allow-ssh-from", envOrDefault("ALLOW_SSH_FROM", ""), "Comma-separated CIDRs for SSH access (empty=no SSH rule)")
 	flag.BoolVar(&nodePortPublic, "nodeport-public", false, "Expose NodePort range (30000-32767) to the internet")
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "Address for metrics endpoint")
+	flag.StringVar(&healthAddr, "health-addr", ":8081", "Address for health probe endpoint")
 	flag.StringVar(&labelSelector, "label-selector", "", "Label selector to filter nodes")
 	flag.Parse()
 
@@ -84,12 +87,22 @@ func main() {
 		Metrics: metricsserver.Options{
 			BindAddress: metricsAddr,
 		},
+		HealthProbeBindAddress: healthAddr,
 		// Leader election for HA deployments
 		LeaderElection:   true,
 		LeaderElectionID: "hetzner-firewall-operator",
 	})
 	if err != nil {
 		logger.Error("unable to create manager", "error", err)
+		os.Exit(1)
+	}
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		logger.Error("unable to set up health check", "error", err)
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		logger.Error("unable to set up ready check", "error", err)
 		os.Exit(1)
 	}
 

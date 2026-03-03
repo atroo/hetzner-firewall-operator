@@ -317,7 +317,86 @@ func TestExtractNodeInfos(t *testing.T) {
 		t.Errorf("worker-1 IPv4: got %v", infos[1].IPv4)
 	}
 	if infos[1].IPv6Net == nil {
-		t.Error("worker-1 should have IPv6Net")
+		t.Fatal("worker-1 should have IPv6Net")
+	}
+	// IPv6 must be masked to /64 network boundary (host bits zeroed)
+	expectedIPv6 := net.ParseIP("2001:db8::")
+	if !infos[1].IPv6Net.IP.Equal(expectedIPv6) {
+		t.Errorf("worker-1 IPv6Net.IP = %v, want %v (masked to /64)", infos[1].IPv6Net.IP, expectedIPv6)
+	}
+	ones, bits := infos[1].IPv6Net.Mask.Size()
+	if ones != 64 || bits != 128 {
+		t.Errorf("worker-1 IPv6Net.Mask = /%d (of %d), want /64", ones, bits)
+	}
+}
+
+func TestBuildNodeInfo_IPv6Masking(t *testing.T) {
+	r := &NodeReconciler{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	tests := []struct {
+		name       string
+		addr       string
+		wantNetIP  string
+		wantPrefix int
+	}{
+		{
+			name:       "host bits zeroed",
+			addr:       "2001:db8::5",
+			wantNetIP:  "2001:db8::",
+			wantPrefix: 64,
+		},
+		{
+			name:       "already network address",
+			addr:       "2001:db8::",
+			wantNetIP:  "2001:db8::",
+			wantPrefix: 64,
+		},
+		{
+			name:       "complex host part",
+			addr:       "2a01:4f8:c012:abc0::1",
+			wantNetIP:  "2a01:4f8:c012:abc0::",
+			wantPrefix: 64,
+		},
+		{
+			name:       "full host bits set",
+			addr:       "fd00:1234:5678:9abc:deff:aabb:ccdd:eeff",
+			wantNetIP:  "fd00:1234:5678:9abc::",
+			wantPrefix: 64,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-node"},
+				Spec:       corev1.NodeSpec{ProviderID: "hcloud://1"},
+				Status: corev1.NodeStatus{
+					Addresses: []corev1.NodeAddress{
+						{Type: corev1.NodeExternalIP, Address: "1.2.3.4"},
+						{Type: corev1.NodeInternalIP, Address: tt.addr},
+					},
+				},
+			}
+
+			info, ok := r.buildNodeInfo(node, 1)
+			if !ok {
+				t.Fatal("buildNodeInfo returned false")
+			}
+			if info.IPv6Net == nil {
+				t.Fatal("IPv6Net is nil")
+			}
+
+			wantIP := net.ParseIP(tt.wantNetIP)
+			if !info.IPv6Net.IP.Equal(wantIP) {
+				t.Errorf("IPv6Net.IP = %v, want %v", info.IPv6Net.IP, wantIP)
+			}
+			ones, bits := info.IPv6Net.Mask.Size()
+			if ones != tt.wantPrefix || bits != 128 {
+				t.Errorf("IPv6Net.Mask = /%d (of %d), want /%d", ones, bits, tt.wantPrefix)
+			}
+		})
 	}
 }
 
