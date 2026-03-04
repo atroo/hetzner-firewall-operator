@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"path"
 	"sort"
 	"strings"
 
@@ -25,6 +26,10 @@ type NodeInfo struct {
 // an hcloud:// provider ID (e.g. RKE2 without HCCM).
 type ServerResolver interface {
 	ResolveServerIDs(ctx context.Context, names []string) (map[string]int64, error)
+	// DiscoverServers returns NodeInfo for all Hetzner servers whose name matches
+	// the given glob pattern (e.g. "platform-*"). Used to include pre-join servers
+	// in firewall rules before they register with Kubernetes.
+	DiscoverServers(ctx context.Context, namePattern string) ([]NodeInfo, error)
 }
 
 // Client wraps the Hetzner Cloud API for firewall operations.
@@ -66,6 +71,46 @@ func (c *Client) ResolveServerIDs(ctx context.Context, names []string) (map[stri
 			result[s.Name] = s.ID
 		}
 	}
+	return result, nil
+}
+
+// DiscoverServers lists all Hetzner servers whose name matches the given glob pattern
+// and returns NodeInfo built from Hetzner API data. This allows pre-join servers
+// to be included in firewall rules before they register with Kubernetes.
+func (c *Client) DiscoverServers(ctx context.Context, namePattern string) ([]NodeInfo, error) {
+	servers, err := c.hcloud.Server.All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list servers from Hetzner API: %w", err)
+	}
+
+	var result []NodeInfo
+	for _, s := range servers {
+		matched, err := path.Match(namePattern, s.Name)
+		if err != nil {
+			return nil, fmt.Errorf("invalid name pattern %q: %w", namePattern, err)
+		}
+		if !matched {
+			continue
+		}
+
+		info := NodeInfo{
+			Name:     s.Name,
+			ServerID: s.ID,
+			IsServer: false,
+		}
+
+		if s.PublicNet.IPv4.IP != nil {
+			info.IPv4 = s.PublicNet.IPv4.IP
+		}
+		if s.PublicNet.IPv6.Network != nil {
+			info.IPv6Net = s.PublicNet.IPv6.Network
+		}
+
+		if info.IPv4 != nil || info.IPv6Net != nil {
+			result = append(result, info)
+		}
+	}
+
 	return result, nil
 }
 

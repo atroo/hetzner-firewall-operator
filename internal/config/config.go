@@ -32,6 +32,14 @@ type Config struct {
 
 	// LabelSelector filters which nodes to include (e.g. "node-role.kubernetes.io/control-plane").
 	LabelSelector string
+
+	// ServerNamePattern is a glob pattern (e.g. "platform-*") to discover Hetzner servers
+	// via the API before they join the K8s cluster. Empty = disabled.
+	ServerNamePattern string
+
+	// DiscoveryInterval is how often to poll the Hetzner API for new servers
+	// matching ServerNamePattern. Only used when ServerNamePattern is set.
+	DiscoveryInterval time.Duration
 }
 
 // PortRule defines a firewall port rule template.

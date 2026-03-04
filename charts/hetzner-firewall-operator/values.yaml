@@ -36,6 +36,16 @@ operator:
   # Empty string = all nodes.
   labelSelector: ""
 
+  # Glob pattern to discover Hetzner servers via the API for pre-join firewall rules.
+  # Servers matching this pattern are included in firewall rules before they join K8s.
+  # Empty string = disabled (no pre-join discovery).
+  # Example: "platform-*"
+  serverNamePattern: ""
+
+  # How often to poll the Hetzner API for new servers matching serverNamePattern.
+  # Only used when serverNamePattern is set. Go duration format.
+  discoveryInterval: "30s"
+
   # Address for the metrics endpoint.
   metricsAddr: ":8080"
 

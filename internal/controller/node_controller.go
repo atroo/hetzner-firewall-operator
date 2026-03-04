@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/atroo/hetzner-firewall-operator/internal/config"
@@ -16,8 +18,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 // NodeReconciler watches Kubernetes nodes and reconciles Hetzner firewall rules.
@@ -31,6 +35,15 @@ type NodeReconciler struct {
 	// lastReconcile tracks the last successful reconciliation time
 	// to implement rate limiting.
 	lastReconcile time.Time
+
+	// discoveryCh is used by the discovery poller to trigger reconciliation
+	// when the set of discovered servers changes.
+	discoveryCh chan event.GenericEvent
+
+	// discoveredMu protects discoveredServers.
+	discoveredMu sync.RWMutex
+	// discoveredServers caches the latest results from DiscoverServers polling.
+	discoveredServers []firewall.NodeInfo
 }
 
 // NewNodeReconciler creates a new NodeReconciler.
@@ -47,6 +60,7 @@ func NewNodeReconciler(
 		serverResolver: serverResolver,
 		cfg:            cfg,
 		logger:         logger,
+		discoveryCh:    make(chan event.GenericEvent, 1),
 	}
 }
 
@@ -74,11 +88,38 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req reconcile.Request) (
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, err
 	}
 
-	// Convert K8s nodes to NodeInfo
+	// Convert K8s nodes to NodeInfo (passes 1+2: hcloud:// and RKE2 name resolution)
 	nodes, err := r.extractNodeInfos(ctx, nodeList.Items)
 	if err != nil {
 		r.logger.Error("failed to extract node info", "error", err)
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, err
+	}
+
+	// Pass 3: merge cached discovered servers (populated by discovery poller)
+	if r.cfg.ServerNamePattern != "" {
+		discovered := r.getDiscoveredServers()
+		if len(discovered) > 0 {
+			existing := make(map[int64]struct{}, len(nodes))
+			for _, n := range nodes {
+				if n.ServerID > 0 {
+					existing[n.ServerID] = struct{}{}
+				}
+			}
+			var added int
+			for _, d := range discovered {
+				if _, ok := existing[d.ServerID]; !ok {
+					nodes = append(nodes, d)
+					added++
+				}
+			}
+			if added > 0 {
+				r.logger.Info("added pre-join servers from discovery cache",
+					"pattern", r.cfg.ServerNamePattern,
+					"cached", len(discovered),
+					"newServers", added,
+				)
+			}
+		}
 	}
 
 	if len(nodes) == 0 {
@@ -200,10 +241,112 @@ func (r *NodeReconciler) buildNodeInfo(node *corev1.Node, serverID int64) (firew
 	return info, false
 }
 
+// Start implements manager.Runnable. It runs a discovery polling loop that
+// checks the Hetzner API for new servers matching ServerNamePattern and
+// triggers reconciliation when the set changes.
+func (r *NodeReconciler) Start(ctx context.Context) error {
+	if r.cfg.ServerNamePattern == "" {
+		r.logger.Info("discovery poller disabled (no server name pattern)")
+		return nil
+	}
+
+	interval := r.cfg.DiscoveryInterval
+	if interval == 0 {
+		interval = 30 * time.Second
+	}
+
+	r.logger.Info("starting discovery poller",
+		"pattern", r.cfg.ServerNamePattern,
+		"interval", interval,
+	)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			r.logger.Info("discovery poller stopped")
+			return nil
+		case <-ticker.C:
+			r.pollDiscovery(ctx)
+		}
+	}
+}
+
+// pollDiscovery calls DiscoverServers and triggers reconciliation if the set changed.
+func (r *NodeReconciler) pollDiscovery(ctx context.Context) {
+	discovered, err := r.serverResolver.DiscoverServers(ctx, r.cfg.ServerNamePattern)
+	if err != nil {
+		r.logger.Warn("discovery poll failed", "error", err)
+		return
+	}
+
+	// Build sorted ID set for comparison
+	newIDs := make([]int64, len(discovered))
+	for i, d := range discovered {
+		newIDs[i] = d.ServerID
+	}
+	sort.Slice(newIDs, func(i, j int) bool { return newIDs[i] < newIDs[j] })
+
+	r.discoveredMu.RLock()
+	oldIDs := make([]int64, len(r.discoveredServers))
+	for i, d := range r.discoveredServers {
+		oldIDs[i] = d.ServerID
+	}
+	r.discoveredMu.RUnlock()
+	sort.Slice(oldIDs, func(i, j int) bool { return oldIDs[i] < oldIDs[j] })
+
+	changed := !int64SliceEqual(newIDs, oldIDs)
+
+	// Always update the cache
+	r.discoveredMu.Lock()
+	r.discoveredServers = discovered
+	r.discoveredMu.Unlock()
+
+	if changed {
+		r.logger.Info("discovered server set changed, triggering reconciliation",
+			"oldCount", len(oldIDs),
+			"newCount", len(newIDs),
+		)
+		// Non-blocking send — if a reconcile is already pending, skip
+		select {
+		case r.discoveryCh <- event.GenericEvent{Object: &corev1.Node{}}:
+		default:
+		}
+	}
+}
+
+// getDiscoveredServers returns a copy of the cached discovered servers.
+func (r *NodeReconciler) getDiscoveredServers() []firewall.NodeInfo {
+	r.discoveredMu.RLock()
+	defer r.discoveredMu.RUnlock()
+	if r.discoveredServers == nil {
+		return nil
+	}
+	out := make([]firewall.NodeInfo, len(r.discoveredServers))
+	copy(out, r.discoveredServers)
+	return out
+}
+
+// int64SliceEqual returns true if two sorted int64 slices are equal.
+func int64SliceEqual(a, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // SetupWithManager registers the controller with the manager.
 func (r *NodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Node{}).
+		WatchesRawSource(source.Channel(r.discoveryCh, &handler.EnqueueRequestForObject{})).
 		WithEventFilter(nodeEventFilter()).
 		Complete(r)
 }

@@ -21,20 +21,24 @@ func main() {
 	var (
 		firewallName      string
 		reconcileInterval time.Duration
+		discoveryInterval time.Duration
 		allowSSH          string
 		nodePortPublic    bool
 		metricsAddr       string
 		healthAddr        string
 		labelSelector     string
+		serverNamePattern string
 	)
 
 	flag.StringVar(&firewallName, "firewall-name", envOrDefault("FIREWALL_NAME", "k8s-cluster"), "Name of the Hetzner firewall to manage")
 	flag.DurationVar(&reconcileInterval, "reconcile-interval", 5*time.Minute, "Interval between full reconciliations")
+	flag.DurationVar(&discoveryInterval, "discovery-interval", parseDurationOrDefault(envOrDefault("DISCOVERY_INTERVAL", ""), 30*time.Second), "Interval for polling Hetzner API to discover new servers")
 	flag.StringVar(&allowSSH, "allow-ssh-from", envOrDefault("ALLOW_SSH_FROM", ""), "Comma-separated CIDRs for SSH access (empty=no SSH rule)")
 	flag.BoolVar(&nodePortPublic, "nodeport-public", false, "Expose NodePort range (30000-32767) to the internet")
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "Address for metrics endpoint")
 	flag.StringVar(&healthAddr, "health-addr", ":8081", "Address for health probe endpoint")
 	flag.StringVar(&labelSelector, "label-selector", "", "Label selector to filter nodes")
+	flag.StringVar(&serverNamePattern, "server-name-pattern", envOrDefault("SERVER_NAME_PATTERN", ""), "Glob pattern to discover Hetzner servers for pre-join firewall rules (e.g. platform-*)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -63,7 +67,9 @@ func main() {
 		AllowSSHFrom:      sshCIDRs,
 		NodePortPublic:    nodePortPublic,
 		ReconcileInterval: reconcileInterval,
+		DiscoveryInterval: discoveryInterval,
 		LabelSelector:     labelSelector,
+		ServerNamePattern: serverNamePattern,
 	}
 
 	logger.Info("starting hetzner-firewall-operator",
@@ -120,11 +126,28 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register the discovery poller as a manager runnable
+	if err := mgr.Add(reconciler); err != nil {
+		logger.Error("unable to register discovery poller", "error", err)
+		os.Exit(1)
+	}
+
 	logger.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		logger.Error("manager exited with error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func parseDurationOrDefault(s string, fallback time.Duration) time.Duration {
+	if s == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 func envOrDefault(key, fallback string) string {

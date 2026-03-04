@@ -49,6 +49,12 @@ spec:
             {{- if .Values.operator.labelSelector }}
             - --label-selector={{ .Values.operator.labelSelector }}
             {{- end }}
+            {{- if .Values.operator.serverNamePattern }}
+            - --server-name-pattern={{ .Values.operator.serverNamePattern }}
+            {{- if .Values.operator.discoveryInterval }}
+            - --discovery-interval={{ .Values.operator.discoveryInterval }}
+            {{- end }}
+            {{- end }}
           env:
             - name: HCLOUD_TOKEN
               valueFrom:

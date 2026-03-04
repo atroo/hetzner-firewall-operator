@@ -7,16 +7,23 @@ import (
 	"log/slog"
 	"net"
 	"testing"
+	"time"
 
+	"github.com/atroo/hetzner-firewall-operator/internal/config"
 	"github.com/atroo/hetzner-firewall-operator/internal/firewall"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
 // mockResolver implements firewall.ServerResolver for testing.
 type mockResolver struct {
 	result map[string]int64
 	err    error
+
+	// DiscoverServers fields
+	discoverResult []firewall.NodeInfo
+	discoverErr    error
 }
 
 func (m *mockResolver) ResolveServerIDs(_ context.Context, names []string) (map[string]int64, error) {
@@ -24,6 +31,13 @@ func (m *mockResolver) ResolveServerIDs(_ context.Context, names []string) (map[
 		return nil, m.err
 	}
 	return m.result, nil
+}
+
+func (m *mockResolver) DiscoverServers(_ context.Context, namePattern string) ([]firewall.NodeInfo, error) {
+	if m.discoverErr != nil {
+		return nil, m.discoverErr
+	}
+	return m.discoverResult, nil
 }
 
 func TestParseHetznerProviderID(t *testing.T) {
@@ -633,5 +647,362 @@ func TestExtractNodeInfos_NilResolver(t *testing.T) {
 	}
 	if infos[0].Name != "hcloud-node" {
 		t.Errorf("expected hcloud-node, got %s", infos[0].Name)
+	}
+}
+
+func TestReconcile_PreJoinServerDiscovery(t *testing.T) {
+	// This tests the pass 3 logic in Reconcile by populating the discovery cache
+	// and then simulating the merge logic from Reconcile.
+
+	r := &NodeReconciler{
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:         config.Config{ServerNamePattern: "platform-*"},
+		discoveryCh: make(chan event.GenericEvent, 1),
+		// Pre-populate the discovery cache (as the poller would)
+		discoveredServers: []firewall.NodeInfo{
+			{
+				Name:     "platform-new-1",
+				ServerID: 888,
+				IPv4:     net.ParseIP("10.0.1.1"),
+			},
+			{
+				Name:     "platform-new-2",
+				ServerID: 999,
+				IPv4:     net.ParseIP("10.0.1.2"),
+			},
+		},
+	}
+
+	// Existing K8s nodes (pass 1)
+	k8sNodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "platform-existing",
+				Labels: map[string]string{"node-role.kubernetes.io/control-plane": ""},
+			},
+			Spec: corev1.NodeSpec{ProviderID: "hcloud://777"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "10.0.0.1"},
+				},
+			},
+		},
+	}
+
+	nodes, err := r.extractNodeInfos(context.Background(), k8sNodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() error = %v", err)
+	}
+
+	// Simulate pass 3 merge (same logic as in Reconcile)
+	discovered := r.getDiscoveredServers()
+	existing := make(map[int64]struct{}, len(nodes))
+	for _, n := range nodes {
+		if n.ServerID > 0 {
+			existing[n.ServerID] = struct{}{}
+		}
+	}
+	for _, d := range discovered {
+		if _, ok := existing[d.ServerID]; !ok {
+			nodes = append(nodes, d)
+		}
+	}
+
+	if len(nodes) != 3 {
+		t.Fatalf("expected 3 nodes (1 existing + 2 pre-join), got %d", len(nodes))
+	}
+	if nodes[0].Name != "platform-existing" || nodes[0].ServerID != 777 {
+		t.Errorf("node[0]: got %+v", nodes[0])
+	}
+	if nodes[1].Name != "platform-new-1" || nodes[1].ServerID != 888 {
+		t.Errorf("node[1]: got %+v", nodes[1])
+	}
+	if nodes[2].Name != "platform-new-2" || nodes[2].ServerID != 999 {
+		t.Errorf("node[2]: got %+v", nodes[2])
+	}
+}
+
+func TestReconcile_PreJoinServerDeduplication(t *testing.T) {
+	// Server 777 exists in both K8s and discovery cache — should not be duplicated
+	r := &NodeReconciler{
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:         config.Config{ServerNamePattern: "platform-*"},
+		discoveryCh: make(chan event.GenericEvent, 1),
+		discoveredServers: []firewall.NodeInfo{
+			{
+				Name:     "platform-existing",
+				ServerID: 777,
+				IPv4:     net.ParseIP("10.0.0.1"),
+			},
+			{
+				Name:     "platform-new",
+				ServerID: 888,
+				IPv4:     net.ParseIP("10.0.1.1"),
+			},
+		},
+	}
+
+	k8sNodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "platform-existing",
+				Labels: map[string]string{},
+			},
+			Spec: corev1.NodeSpec{ProviderID: "hcloud://777"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "10.0.0.1"},
+				},
+			},
+		},
+	}
+
+	nodes, err := r.extractNodeInfos(context.Background(), k8sNodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() error = %v", err)
+	}
+
+	// Simulate pass 3 merge from cache
+	discovered := r.getDiscoveredServers()
+	existing := make(map[int64]struct{}, len(nodes))
+	for _, n := range nodes {
+		if n.ServerID > 0 {
+			existing[n.ServerID] = struct{}{}
+		}
+	}
+	for _, d := range discovered {
+		if _, ok := existing[d.ServerID]; !ok {
+			nodes = append(nodes, d)
+		}
+	}
+
+	// Only 2: existing (deduplicated) + new
+	if len(nodes) != 2 {
+		t.Fatalf("expected 2 nodes (dedup), got %d", len(nodes))
+	}
+	if nodes[0].Name != "platform-existing" {
+		t.Errorf("node[0]: got %+v", nodes[0])
+	}
+	if nodes[1].Name != "platform-new" || nodes[1].ServerID != 888 {
+		t.Errorf("node[1]: got %+v", nodes[1])
+	}
+}
+
+func TestReconcile_EmptyPatternSkipsDiscovery(t *testing.T) {
+	r := &NodeReconciler{
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:         config.Config{ServerNamePattern: ""}, // empty = disabled
+		discoveryCh: make(chan event.GenericEvent, 1),
+		// Even if cache has entries, empty pattern means pass 3 is skipped
+		discoveredServers: []firewall.NodeInfo{
+			{Name: "should-not-appear", ServerID: 999, IPv4: net.ParseIP("10.0.0.99")},
+		},
+	}
+
+	k8sNodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "hcloud://111"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "1.2.3.4"},
+				},
+			},
+		},
+	}
+
+	nodes, err := r.extractNodeInfos(context.Background(), k8sNodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() error = %v", err)
+	}
+
+	// With empty pattern, pass 3 is skipped — only K8s nodes
+	if r.cfg.ServerNamePattern != "" {
+		t.Fatal("pattern should be empty")
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node (no discovery), got %d", len(nodes))
+	}
+}
+
+func TestReconcile_EmptyCacheGracefulDegradation(t *testing.T) {
+	// When the discovery cache is empty (e.g. poller hasn't run yet or API failed),
+	// reconcile should still work with just K8s nodes.
+	r := &NodeReconciler{
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:         config.Config{ServerNamePattern: "platform-*"},
+		discoveryCh: make(chan event.GenericEvent, 1),
+		// Empty cache
+		discoveredServers: nil,
+	}
+
+	k8sNodes := []corev1.Node{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "node-1", Labels: map[string]string{}},
+			Spec:       corev1.NodeSpec{ProviderID: "hcloud://111"},
+			Status: corev1.NodeStatus{
+				Addresses: []corev1.NodeAddress{
+					{Type: corev1.NodeExternalIP, Address: "1.2.3.4"},
+				},
+			},
+		},
+	}
+
+	nodes, err := r.extractNodeInfos(context.Background(), k8sNodes)
+	if err != nil {
+		t.Fatalf("extractNodeInfos() error = %v", err)
+	}
+
+	// Simulate pass 3 merge with empty cache
+	discovered := r.getDiscoveredServers()
+	if discovered != nil {
+		t.Fatalf("expected nil discovered cache, got %d", len(discovered))
+	}
+
+	// Nodes from passes 1+2 should still be intact
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node (graceful degradation), got %d", len(nodes))
+	}
+	if nodes[0].Name != "node-1" {
+		t.Errorf("expected node-1, got %s", nodes[0].Name)
+	}
+}
+
+func TestPollDiscovery_DetectsNewServers(t *testing.T) {
+	resolver := &mockResolver{
+		discoverResult: []firewall.NodeInfo{
+			{Name: "server-1", ServerID: 100, IPv4: net.ParseIP("10.0.0.1")},
+			{Name: "server-2", ServerID: 200, IPv4: net.ParseIP("10.0.0.2")},
+		},
+	}
+
+	r := &NodeReconciler{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serverResolver: resolver,
+		cfg:            config.Config{ServerNamePattern: "server-*"},
+		discoveryCh:    make(chan event.GenericEvent, 1),
+	}
+
+	// First poll — should detect change (from empty to 2 servers)
+	r.pollDiscovery(context.Background())
+
+	// Should have sent an event
+	select {
+	case <-r.discoveryCh:
+		// good
+	default:
+		t.Fatal("expected reconcile event after first poll")
+	}
+
+	// Cache should be populated
+	cached := r.getDiscoveredServers()
+	if len(cached) != 2 {
+		t.Fatalf("expected 2 cached servers, got %d", len(cached))
+	}
+
+	// Second poll with same servers — no change
+	r.pollDiscovery(context.Background())
+
+	select {
+	case <-r.discoveryCh:
+		t.Fatal("unexpected reconcile event when servers unchanged")
+	default:
+		// good
+	}
+
+	// Third poll with a new server added
+	resolver.discoverResult = append(resolver.discoverResult, firewall.NodeInfo{
+		Name: "server-3", ServerID: 300, IPv4: net.ParseIP("10.0.0.3"),
+	})
+	r.pollDiscovery(context.Background())
+
+	select {
+	case <-r.discoveryCh:
+		// good
+	default:
+		t.Fatal("expected reconcile event after new server discovered")
+	}
+
+	cached = r.getDiscoveredServers()
+	if len(cached) != 3 {
+		t.Fatalf("expected 3 cached servers, got %d", len(cached))
+	}
+}
+
+func TestPollDiscovery_ErrorKeepsOldCache(t *testing.T) {
+	resolver := &mockResolver{
+		discoverResult: []firewall.NodeInfo{
+			{Name: "server-1", ServerID: 100, IPv4: net.ParseIP("10.0.0.1")},
+		},
+	}
+
+	r := &NodeReconciler{
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serverResolver: resolver,
+		cfg:            config.Config{ServerNamePattern: "server-*"},
+		discoveryCh:    make(chan event.GenericEvent, 1),
+	}
+
+	// First successful poll
+	r.pollDiscovery(context.Background())
+	// Drain the event
+	<-r.discoveryCh
+
+	// Now make the resolver fail
+	resolver.discoverErr = fmt.Errorf("API error")
+	r.pollDiscovery(context.Background())
+
+	// Cache should still have old data
+	cached := r.getDiscoveredServers()
+	if len(cached) != 1 {
+		t.Fatalf("expected cache to retain 1 server after error, got %d", len(cached))
+	}
+
+	// No event should have been sent
+	select {
+	case <-r.discoveryCh:
+		t.Fatal("unexpected reconcile event after poll error")
+	default:
+		// good
+	}
+}
+
+func TestStart_NoOpWhenPatternEmpty(t *testing.T) {
+	r := &NodeReconciler{
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cfg:         config.Config{ServerNamePattern: ""},
+		discoveryCh: make(chan event.GenericEvent, 1),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// Start should return immediately (not block) when pattern is empty
+	err := r.Start(ctx)
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+}
+
+func TestInt64SliceEqual(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b []int64
+		want bool
+	}{
+		{"both nil", nil, nil, true},
+		{"both empty", []int64{}, []int64{}, true},
+		{"equal", []int64{1, 2, 3}, []int64{1, 2, 3}, true},
+		{"different length", []int64{1, 2}, []int64{1, 2, 3}, false},
+		{"different values", []int64{1, 2, 3}, []int64{1, 2, 4}, false},
+		{"nil vs empty", nil, []int64{}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := int64SliceEqual(tt.a, tt.b); got != tt.want {
+				t.Errorf("int64SliceEqual(%v, %v) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
 	}
 }

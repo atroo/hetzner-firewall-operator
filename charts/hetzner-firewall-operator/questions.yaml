@@ -51,6 +51,20 @@ questions:
     default: ""
     group: "Operator"
 
+  - variable: operator.serverNamePattern
+    label: Server Name Pattern
+    description: "Glob pattern to discover Hetzner servers for pre-join firewall rules (e.g. platform-*). Empty = disabled."
+    type: string
+    default: ""
+    group: "Operator"
+
+  - variable: operator.discoveryInterval
+    label: Discovery Poll Interval
+    description: "How often to poll the Hetzner API for new servers matching the server name pattern (Go duration, e.g. 30s, 1m). Only used when serverNamePattern is set."
+    type: string
+    default: "30s"
+    group: "Operator"
+
   # --- Deployment ---
   - variable: imagePullSecrets
     label: Image Pull Secrets
