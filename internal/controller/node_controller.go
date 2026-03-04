@@ -95,9 +95,24 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req reconcile.Request) (
 		return reconcile.Result{RequeueAfter: 30 * time.Second}, err
 	}
 
-	// Pass 3: merge cached discovered servers (populated by discovery poller)
-	if r.cfg.ServerNamePattern != "" {
+	// Pass 3: merge discovered pre-join servers
+	if r.cfg.ServerNamePattern != "" && r.serverResolver != nil {
 		discovered := r.getDiscoveredServers()
+		// If the poller cache is not yet populated (nil), fall back to an
+		// inline API call so the very first reconcile doesn't produce rules
+		// that omit pre-join servers (which would remove their IPs from
+		// existing rules while leaving the firewall applied to them).
+		if discovered == nil {
+			r.logger.Info("discovery cache not yet populated, calling Hetzner API inline")
+			var err error
+			discovered, err = r.serverResolver.DiscoverServers(ctx, r.cfg.ServerNamePattern)
+			if err != nil {
+				r.logger.Warn("inline discovery failed, continuing without pre-join servers",
+					"pattern", r.cfg.ServerNamePattern,
+					"error", err,
+				)
+			}
+		}
 		if len(discovered) > 0 {
 			existing := make(map[int64]struct{}, len(nodes))
 			for _, n := range nodes {
@@ -113,9 +128,9 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req reconcile.Request) (
 				}
 			}
 			if added > 0 {
-				r.logger.Info("added pre-join servers from discovery cache",
+				r.logger.Info("added pre-join servers",
 					"pattern", r.cfg.ServerNamePattern,
-					"cached", len(discovered),
+					"discovered", len(discovered),
 					"newServers", added,
 				)
 			}
@@ -283,6 +298,11 @@ func (r *NodeReconciler) pollDiscovery(ctx context.Context) {
 	if err != nil {
 		r.logger.Warn("discovery poll failed", "error", err)
 		return
+	}
+	// Ensure non-nil so we can distinguish "polled, found nothing" from
+	// "never polled" (nil). Reconcile uses nil to trigger an inline fallback.
+	if discovered == nil {
+		discovered = []firewall.NodeInfo{}
 	}
 
 	// Build sorted ID set for comparison

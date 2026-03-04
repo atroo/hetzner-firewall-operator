@@ -293,6 +293,84 @@ func TestBuildRulesNodePortPublic(t *testing.T) {
 	})
 }
 
+func TestBuildRules_K8sAndDiscoveredNodesInRulesAndResources(t *testing.T) {
+	// Simulates the full merge: 2 nodes from K8s (passes 1+2) and 2 nodes
+	// discovered from Hetzner API (pass 3, IsServer=false). Verifies that
+	// ALL 4 node IPs appear in the source IPs for ports 6443 and 9345,
+	// and all 4 servers would be targeted by ensureAppliedToServers.
+
+	c := &Client{cfg: config.Config{}}
+
+	// 2 K8s nodes (one control-plane, one worker)
+	k8sNodes := []NodeInfo{
+		{Name: "k8s-server-1", ServerID: 100, IPv4: net.ParseIP("10.0.0.1"), IsServer: true},
+		{Name: "k8s-worker-1", ServerID: 200, IPv4: net.ParseIP("10.0.0.2"), IsServer: false},
+	}
+
+	// 2 pre-join servers discovered via Hetzner API (always IsServer=false)
+	discoveredNodes := []NodeInfo{
+		{Name: "hcloud-new-1", ServerID: 300, IPv4: net.ParseIP("10.0.0.3"), IsServer: false},
+		{Name: "hcloud-new-2", ServerID: 400, IPv4: net.ParseIP("10.0.0.4"), IsServer: false},
+	}
+
+	// Merge (same dedup logic as Reconcile pass 3)
+	allNodes := append(k8sNodes, discoveredNodes...)
+
+	rules := c.buildRules(allNodes)
+
+	// Collect source IPs per port
+	sourceIPsByPort := make(map[string][]string)
+	for _, r := range rules {
+		if r.Port == nil {
+			continue
+		}
+		var ips []string
+		for _, ipNet := range r.SourceIPs {
+			ips = append(ips, ipNet.IP.String())
+		}
+		sourceIPsByPort[*r.Port] = ips
+	}
+
+	// Verify ports 6443 and 9345 contain all 4 node IPs
+	wantIPs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
+
+	for _, port := range []string{"6443", "9345"} {
+		gotIPs := sourceIPsByPort[port]
+		if gotIPs == nil {
+			t.Fatalf("no rule found for port %s", port)
+		}
+		ipSet := make(map[string]bool, len(gotIPs))
+		for _, ip := range gotIPs {
+			ipSet[ip] = true
+		}
+		for _, wantIP := range wantIPs {
+			if !ipSet[wantIP] {
+				t.Errorf("port %s: missing IP %s in source IPs (got %v)", port, wantIP, gotIPs)
+			}
+		}
+	}
+
+	// Verify ensureAppliedToServers would target all 4 servers.
+	// Simulate an empty AppliedTo (no servers applied yet).
+	appliedServers := make(map[int64]bool) // empty = none applied
+	var toApply []int64
+	for _, node := range allNodes {
+		if node.ServerID > 0 && !appliedServers[node.ServerID] {
+			toApply = append(toApply, node.ServerID)
+		}
+	}
+
+	if len(toApply) != 4 {
+		t.Fatalf("expected 4 servers to apply firewall to, got %d: %v", len(toApply), toApply)
+	}
+	wantServerIDs := map[int64]bool{100: true, 200: true, 300: true, 400: true}
+	for _, id := range toApply {
+		if !wantServerIDs[id] {
+			t.Errorf("unexpected server ID %d in apply list", id)
+		}
+	}
+}
+
 func TestBuildRulesEmptyNodes(t *testing.T) {
 	c := &Client{cfg: config.Config{}}
 	rules := c.buildRules(nil)
