@@ -260,6 +260,9 @@ func (r *NodeReconciler) Start(ctx context.Context) error {
 		"interval", interval,
 	)
 
+	// Immediate initial poll so the cache is populated before the first reconcile
+	r.pollDiscovery(ctx)
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -371,7 +374,7 @@ func nodeEventFilter() predicate.Predicate {
 				oldNode.Spec.ProviderID != newNode.Spec.ProviderID
 		},
 		GenericFunc: func(e event.GenericEvent) bool {
-			return false
+			return true // Allow discovery poller events through
 		},
 	}
 }
