@@ -96,7 +96,7 @@ func (c *Client) DiscoverServers(ctx context.Context, namePattern string) ([]Nod
 		info := NodeInfo{
 			Name:     s.Name,
 			ServerID: s.ID,
-			IsServer: false,
+			IsServer: true, // Treat all discovered servers as potential control-plane nodes
 		}
 
 		if s.PublicNet.IPv4.IP != nil {

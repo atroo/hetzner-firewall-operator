@@ -307,10 +307,11 @@ func TestBuildRules_K8sAndDiscoveredNodesInRulesAndResources(t *testing.T) {
 		{Name: "k8s-worker-1", ServerID: 200, IPv4: net.ParseIP("10.0.0.2"), IsServer: false},
 	}
 
-	// 2 pre-join servers discovered via Hetzner API (always IsServer=false)
+	// 2 pre-join servers discovered via Hetzner API (IsServer=true, treated as
+	// potential control-plane so they're included in etcd/server-only rules)
 	discoveredNodes := []NodeInfo{
-		{Name: "hcloud-new-1", ServerID: 300, IPv4: net.ParseIP("10.0.0.3"), IsServer: false},
-		{Name: "hcloud-new-2", ServerID: 400, IPv4: net.ParseIP("10.0.0.4"), IsServer: false},
+		{Name: "hcloud-new-1", ServerID: 300, IPv4: net.ParseIP("10.0.0.3"), IsServer: true},
+		{Name: "hcloud-new-2", ServerID: 400, IPv4: net.ParseIP("10.0.0.4"), IsServer: true},
 	}
 
 	// Merge (same dedup logic as Reconcile pass 3)
@@ -331,10 +332,13 @@ func TestBuildRules_K8sAndDiscoveredNodesInRulesAndResources(t *testing.T) {
 		sourceIPsByPort[*r.Port] = ips
 	}
 
-	// Verify ports 6443 and 9345 contain all 4 node IPs
-	wantIPs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
+	// All 4 node IPs
+	allIPs := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
+	// Server-only IPs (k8s-server-1 + both discovered)
+	serverIPs := []string{"10.0.0.1", "10.0.0.3", "10.0.0.4"}
 
-	for _, port := range []string{"6443", "9345"} {
+	// Ports using SourceClusterNodes must contain all 4 IPs
+	for _, port := range []string{"6443", "9345", "10250"} {
 		gotIPs := sourceIPsByPort[port]
 		if gotIPs == nil {
 			t.Fatalf("no rule found for port %s", port)
@@ -343,10 +347,32 @@ func TestBuildRules_K8sAndDiscoveredNodesInRulesAndResources(t *testing.T) {
 		for _, ip := range gotIPs {
 			ipSet[ip] = true
 		}
-		for _, wantIP := range wantIPs {
+		for _, wantIP := range allIPs {
 			if !ipSet[wantIP] {
 				t.Errorf("port %s: missing IP %s in source IPs (got %v)", port, wantIP, gotIPs)
 			}
+		}
+	}
+
+	// Ports using SourceServerNodes (etcd) must contain server IPs
+	// (k8s-server-1 + both discovered, but NOT k8s-worker-1)
+	for _, port := range []string{"2379", "2380"} {
+		gotIPs := sourceIPsByPort[port]
+		if gotIPs == nil {
+			t.Fatalf("no rule found for port %s", port)
+		}
+		ipSet := make(map[string]bool, len(gotIPs))
+		for _, ip := range gotIPs {
+			ipSet[ip] = true
+		}
+		for _, wantIP := range serverIPs {
+			if !ipSet[wantIP] {
+				t.Errorf("port %s: missing server IP %s in source IPs (got %v)", port, wantIP, gotIPs)
+			}
+		}
+		// Worker must NOT be in etcd rules
+		if ipSet["10.0.0.2"] {
+			t.Errorf("port %s: worker IP 10.0.0.2 should not be in server-only rule", port)
 		}
 	}
 
