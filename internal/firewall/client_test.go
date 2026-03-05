@@ -175,7 +175,7 @@ func TestBuildRules(t *testing.T) {
 		},
 	}
 
-	rules := c.buildRules(nodes)
+	rules := c.buildRules(nodes, nil)
 
 	if len(rules) == 0 {
 		t.Fatal("expected rules to be generated")
@@ -217,7 +217,7 @@ func TestBuildRulesWithSSH(t *testing.T) {
 		{Name: "server-1", IPv4: net.ParseIP("1.2.3.4"), IsServer: true},
 	}
 
-	rules := c.buildRules(nodes)
+	rules := c.buildRules(nodes, nil)
 
 	var sshRule *hcloud.FirewallRule
 	for i, r := range rules {
@@ -245,7 +245,7 @@ func TestBuildRulesNoSSH(t *testing.T) {
 		{Name: "server-1", IPv4: net.ParseIP("1.2.3.4"), IsServer: true},
 	}
 
-	rules := c.buildRules(nodes)
+	rules := c.buildRules(nodes, nil)
 
 	for _, r := range rules {
 		if r.Description != nil && *r.Description == "SSH access" {
@@ -261,7 +261,7 @@ func TestBuildRulesNodePortPublic(t *testing.T) {
 
 	t.Run("nodeport cluster only", func(t *testing.T) {
 		c := &Client{cfg: config.Config{NodePortPublic: false}}
-		rules := c.buildRules(nodes)
+		rules := c.buildRules(nodes, nil)
 		for _, r := range rules {
 			if r.Description != nil && *r.Description == "NodePort services (TCP)" {
 				// Should have only node IPs, not 0.0.0.0/0
@@ -276,7 +276,7 @@ func TestBuildRulesNodePortPublic(t *testing.T) {
 
 	t.Run("nodeport public", func(t *testing.T) {
 		c := &Client{cfg: config.Config{NodePortPublic: true}}
-		rules := c.buildRules(nodes)
+		rules := c.buildRules(nodes, nil)
 		for _, r := range rules {
 			if r.Description != nil && *r.Description == "NodePort services (TCP)" {
 				hasPublic := false
@@ -317,7 +317,7 @@ func TestBuildRules_K8sAndDiscoveredNodesInRulesAndResources(t *testing.T) {
 	// Merge (same dedup logic as Reconcile pass 3)
 	allNodes := append(k8sNodes, discoveredNodes...)
 
-	rules := c.buildRules(allNodes)
+	rules := c.buildRules(allNodes, nil)
 
 	// Collect source IPs per port
 	sourceIPsByPort := make(map[string][]string)
@@ -397,9 +397,62 @@ func TestBuildRules_K8sAndDiscoveredNodesInRulesAndResources(t *testing.T) {
 	}
 }
 
+func TestBuildRulesWithLoadBalancers(t *testing.T) {
+	nodes := []NodeInfo{
+		{Name: "server-1", IPv4: net.ParseIP("1.2.3.4"), IsServer: true},
+	}
+	lbNets := []net.IPNet{
+		{IP: net.ParseIP("10.0.0.100").To4(), Mask: net.CIDRMask(32, 32)},
+		{IP: net.ParseIP("10.0.0.101").To4(), Mask: net.CIDRMask(32, 32)},
+	}
+
+	t.Run("HTTP/HTTPS restricted to LB IPs", func(t *testing.T) {
+		c := &Client{cfg: config.Config{LoadBalancerNames: []string{"lb-1", "lb-2"}}}
+		rules := c.buildRules(nodes, lbNets)
+
+		for _, r := range rules {
+			if r.Port == nil {
+				continue
+			}
+			if *r.Port == "80" || *r.Port == "443" {
+				if len(r.SourceIPs) != 2 {
+					t.Errorf("port %s: expected 2 LB source IPs, got %d", *r.Port, len(r.SourceIPs))
+				}
+				for _, ip := range r.SourceIPs {
+					if ip.String() == "0.0.0.0/0" {
+						t.Errorf("port %s: should not have public source when LBs configured", *r.Port)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("fallback to public when LB IPs empty", func(t *testing.T) {
+		c := &Client{cfg: config.Config{LoadBalancerNames: []string{"lb-1"}}}
+		rules := c.buildRules(nodes, nil) // no LB IPs resolved
+
+		for _, r := range rules {
+			if r.Port == nil {
+				continue
+			}
+			if *r.Port == "80" || *r.Port == "443" {
+				hasPublic := false
+				for _, ip := range r.SourceIPs {
+					if ip.String() == "0.0.0.0/0" {
+						hasPublic = true
+					}
+				}
+				if !hasPublic {
+					t.Errorf("port %s: should fall back to public when no LB IPs", *r.Port)
+				}
+			}
+		}
+	})
+}
+
 func TestBuildRulesEmptyNodes(t *testing.T) {
 	c := &Client{cfg: config.Config{}}
-	rules := c.buildRules(nil)
+	rules := c.buildRules(nil, nil)
 
 	// Public rules (HTTP, HTTPS) should still exist
 	// Cluster-only rules should be skipped (no source IPs)

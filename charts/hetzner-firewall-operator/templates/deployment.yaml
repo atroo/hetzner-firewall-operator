@@ -55,6 +55,9 @@ spec:
             - --discovery-interval={{ .Values.operator.discoveryInterval }}
             {{- end }}
             {{- end }}
+            {{- if .Values.operator.loadBalancerNames }}
+            - --load-balancer-names={{ join "," .Values.operator.loadBalancerNames }}
+            {{- end }}
           env:
             - name: HCLOUD_TOKEN
               valueFrom:

@@ -135,6 +135,50 @@ func (c *Client) EnsureFirewall(ctx context.Context) (*hcloud.Firewall, error) {
 	return result.Firewall, nil
 }
 
+// DiscoverLoadBalancerIPs resolves the public IPs of the configured load balancers.
+func (c *Client) DiscoverLoadBalancerIPs(ctx context.Context) ([]net.IPNet, error) {
+	if len(c.cfg.LoadBalancerNames) == 0 {
+		return nil, nil
+	}
+
+	nameSet := make(map[string]struct{}, len(c.cfg.LoadBalancerNames))
+	for _, n := range c.cfg.LoadBalancerNames {
+		nameSet[n] = struct{}{}
+	}
+
+	lbs, err := c.hcloud.LoadBalancer.All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list load balancers from Hetzner API: %w", err)
+	}
+
+	var nets []net.IPNet
+	for _, lb := range lbs {
+		if _, ok := nameSet[lb.Name]; !ok {
+			continue
+		}
+		if lb.PublicNet.IPv4.IP != nil {
+			nets = append(nets, net.IPNet{
+				IP:   lb.PublicNet.IPv4.IP.To4(),
+				Mask: net.CIDRMask(32, 32),
+			})
+		}
+		if lb.PublicNet.IPv6.IP != nil {
+			nets = append(nets, net.IPNet{
+				IP:   lb.PublicNet.IPv6.IP,
+				Mask: net.CIDRMask(128, 128),
+			})
+		}
+	}
+
+	if len(nets) == 0 {
+		c.logger.Warn("no IPs found for configured load balancers, falling back to public",
+			"loadBalancerNames", c.cfg.LoadBalancerNames,
+		)
+	}
+
+	return nets, nil
+}
+
 // Reconcile computes the desired firewall rules from the current set of nodes
 // and applies them to the managed Hetzner firewall.
 func (c *Client) Reconcile(ctx context.Context, nodes []NodeInfo) error {
@@ -143,7 +187,16 @@ func (c *Client) Reconcile(ctx context.Context, nodes []NodeInfo) error {
 		return err
 	}
 
-	desired := c.buildRules(nodes)
+	// Discover load balancer IPs if configured
+	var lbNets []net.IPNet
+	if len(c.cfg.LoadBalancerNames) > 0 {
+		lbNets, err = c.DiscoverLoadBalancerIPs(ctx)
+		if err != nil {
+			c.logger.Warn("failed to discover load balancer IPs, falling back to public", "error", err)
+		}
+	}
+
+	desired := c.buildRules(nodes, lbNets)
 
 	if rulesEqual(fw.Rules, desired) {
 		c.logger.Debug("firewall rules already up to date", "ruleCount", len(desired))
@@ -172,12 +225,13 @@ func (c *Client) Reconcile(ctx context.Context, nodes []NodeInfo) error {
 }
 
 // buildRules generates the desired Hetzner firewall rules based on nodes and config.
-func (c *Client) buildRules(nodes []NodeInfo) []hcloud.FirewallRule {
+func (c *Client) buildRules(nodes []NodeInfo, lbNets []net.IPNet) []hcloud.FirewallRule {
 	allNodeNets := nodeIPNets(nodes, false)
 	serverNodeNets := nodeIPNets(nodes, true)
 	publicNets := config.PublicNetworks()
 
-	portRules := config.RKE2CiliumRules(c.cfg.NodePortPublic)
+	useLoadBalancers := len(c.cfg.LoadBalancerNames) > 0
+	portRules := config.RKE2CiliumRules(c.cfg.NodePortPublic, useLoadBalancers)
 
 	// Add SSH rules if configured
 	if len(c.cfg.AllowSSHFrom) > 0 {
@@ -203,6 +257,12 @@ func (c *Client) buildRules(nodes []NodeInfo) []hcloud.FirewallRule {
 			sourceIPs = serverNodeNets
 		case config.SourcePublic:
 			sourceIPs = publicNets
+		case config.SourceLoadBalancers:
+			if len(lbNets) > 0 {
+				sourceIPs = lbNets
+			} else {
+				sourceIPs = publicNets
+			}
 		}
 
 		// Skip rules with no source IPs (e.g. no server nodes yet)

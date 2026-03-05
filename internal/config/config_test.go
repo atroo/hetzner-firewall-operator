@@ -8,7 +8,7 @@ import (
 
 func TestRKE2CiliumRules(t *testing.T) {
 	t.Run("default rules", func(t *testing.T) {
-		rules := RKE2CiliumRules(false)
+		rules := RKE2CiliumRules(false, false)
 
 		if len(rules) == 0 {
 			t.Fatal("expected rules")
@@ -54,7 +54,7 @@ func TestRKE2CiliumRules(t *testing.T) {
 	})
 
 	t.Run("nodeport cluster only", func(t *testing.T) {
-		rules := RKE2CiliumRules(false)
+		rules := RKE2CiliumRules(false, false)
 		for _, r := range rules {
 			if r.Port == "30000-32767" && r.SourceType != SourceClusterNodes {
 				t.Errorf("NodePort should be cluster-only when nodePortPublic=false, got source type %d", r.SourceType)
@@ -63,7 +63,7 @@ func TestRKE2CiliumRules(t *testing.T) {
 	})
 
 	t.Run("nodeport public", func(t *testing.T) {
-		rules := RKE2CiliumRules(true)
+		rules := RKE2CiliumRules(true, false)
 		for _, r := range rules {
 			if r.Port == "30000-32767" && r.SourceType != SourcePublic {
 				t.Errorf("NodePort should be public when nodePortPublic=true, got source type %d", r.SourceType)
@@ -72,7 +72,7 @@ func TestRKE2CiliumRules(t *testing.T) {
 	})
 
 	t.Run("all rules are inbound", func(t *testing.T) {
-		rules := RKE2CiliumRules(false)
+		rules := RKE2CiliumRules(false, false)
 		for _, r := range rules {
 			if r.Direction != hcloud.FirewallRuleDirectionIn {
 				t.Errorf("rule %q should be inbound", r.Description)
@@ -81,7 +81,7 @@ func TestRKE2CiliumRules(t *testing.T) {
 	})
 
 	t.Run("has ICMP rule", func(t *testing.T) {
-		rules := RKE2CiliumRules(false)
+		rules := RKE2CiliumRules(false, false)
 		hasICMP := false
 		for _, r := range rules {
 			if r.Protocol == hcloud.FirewallRuleProtocolICMP {
@@ -93,6 +93,28 @@ func TestRKE2CiliumRules(t *testing.T) {
 		}
 		if !hasICMP {
 			t.Error("expected ICMP rule")
+		}
+	})
+
+	t.Run("load balancer source for HTTP/HTTPS", func(t *testing.T) {
+		rules := RKE2CiliumRules(false, true)
+		for _, r := range rules {
+			if r.Port == "80" || r.Port == "443" {
+				if r.SourceType != SourceLoadBalancers {
+					t.Errorf("port %s: expected SourceLoadBalancers, got %d", r.Port, r.SourceType)
+				}
+			}
+		}
+	})
+
+	t.Run("public source for HTTP/HTTPS without LBs", func(t *testing.T) {
+		rules := RKE2CiliumRules(false, false)
+		for _, r := range rules {
+			if r.Port == "80" || r.Port == "443" {
+				if r.SourceType != SourcePublic {
+					t.Errorf("port %s: expected SourcePublic, got %d", r.Port, r.SourceType)
+				}
+			}
 		}
 	})
 }

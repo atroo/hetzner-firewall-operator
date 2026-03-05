@@ -40,6 +40,11 @@ type Config struct {
 	// DiscoveryInterval is how often to poll the Hetzner API for new servers
 	// matching ServerNamePattern. Only used when ServerNamePattern is set.
 	DiscoveryInterval time.Duration
+
+	// LoadBalancerNames is a list of Hetzner Cloud Load Balancer names.
+	// When set, HTTP/HTTPS (80/443) firewall rules are restricted to the
+	// public IPs of these load balancers instead of 0.0.0.0/0.
+	LoadBalancerNames []string
 }
 
 // PortRule defines a firewall port rule template.
@@ -61,10 +66,18 @@ const (
 	SourceServerNodes
 	// SourcePublic uses 0.0.0.0/0 and ::/0.
 	SourcePublic
+	// SourceLoadBalancers uses the public IPs of configured load balancers.
+	// Falls back to SourcePublic when no load balancer IPs are available.
+	SourceLoadBalancers
 )
 
 // RKE2CiliumRules returns the predefined port rules for an RKE2 + Cilium cluster.
-func RKE2CiliumRules(nodePortPublic bool) []PortRule {
+func RKE2CiliumRules(nodePortPublic bool, useLoadBalancers bool) []PortRule {
+	httpSource := SourcePublic
+	if useLoadBalancers {
+		httpSource = SourceLoadBalancers
+	}
+
 	rules := []PortRule{
 		// RKE2 supervisor API - all nodes → server nodes
 		{
@@ -138,21 +151,21 @@ func RKE2CiliumRules(nodePortPublic bool) []PortRule {
 			Port:        "",
 			SourceType:  SourceClusterNodes,
 		},
-		// HTTP ingress - public
+		// HTTP ingress - public or load balancers only
 		{
 			Description: "HTTP ingress",
 			Direction:   hcloud.FirewallRuleDirectionIn,
 			Protocol:    hcloud.FirewallRuleProtocolTCP,
 			Port:        "80",
-			SourceType:  SourcePublic,
+			SourceType:  httpSource,
 		},
-		// HTTPS ingress - public
+		// HTTPS ingress - public or load balancers only
 		{
 			Description: "HTTPS ingress",
 			Direction:   hcloud.FirewallRuleDirectionIn,
 			Protocol:    hcloud.FirewallRuleProtocolTCP,
 			Port:        "443",
-			SourceType:  SourcePublic,
+			SourceType:  httpSource,
 		},
 	}
 

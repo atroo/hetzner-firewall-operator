@@ -46,6 +46,12 @@ operator:
   # Only used when serverNamePattern is set. Go duration format.
   discoveryInterval: "30s"
 
+  # Hetzner Cloud Load Balancer names. When set, HTTP/HTTPS (80/443) firewall
+  # rules are restricted to the public IPs of these load balancers instead of
+  # allowing all traffic (0.0.0.0/0). The operator resolves LB IPs at runtime.
+  # Example: ["my-lb-1", "my-lb-2"]
+  loadBalancerNames: []
+
   # Address for the metrics endpoint.
   metricsAddr: ":8080"
 

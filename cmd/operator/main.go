@@ -19,15 +19,16 @@ import (
 
 func main() {
 	var (
-		firewallName      string
-		reconcileInterval time.Duration
-		discoveryInterval time.Duration
-		allowSSH          string
-		nodePortPublic    bool
-		metricsAddr       string
-		healthAddr        string
-		labelSelector     string
-		serverNamePattern string
+		firewallName       string
+		reconcileInterval  time.Duration
+		discoveryInterval  time.Duration
+		allowSSH           string
+		nodePortPublic     bool
+		metricsAddr        string
+		healthAddr         string
+		labelSelector      string
+		serverNamePattern  string
+		loadBalancerNames  string
 	)
 
 	flag.StringVar(&firewallName, "firewall-name", envOrDefault("FIREWALL_NAME", "k8s-cluster"), "Name of the Hetzner firewall to manage")
@@ -39,6 +40,7 @@ func main() {
 	flag.StringVar(&healthAddr, "health-addr", ":8081", "Address for health probe endpoint")
 	flag.StringVar(&labelSelector, "label-selector", "", "Label selector to filter nodes")
 	flag.StringVar(&serverNamePattern, "server-name-pattern", envOrDefault("SERVER_NAME_PATTERN", ""), "Glob pattern to discover Hetzner servers for pre-join firewall rules (e.g. platform-*)")
+	flag.StringVar(&loadBalancerNames, "load-balancer-names", envOrDefault("LOAD_BALANCER_NAMES", ""), "Comma-separated Hetzner LB names to restrict HTTP/HTTPS rules to their IPs")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -61,6 +63,15 @@ func main() {
 		}
 	}
 
+	// Parse load balancer names
+	var lbNames []string
+	if loadBalancerNames != "" {
+		lbNames = strings.Split(loadBalancerNames, ",")
+		for i := range lbNames {
+			lbNames[i] = strings.TrimSpace(lbNames[i])
+		}
+	}
+
 	cfg := config.Config{
 		HCloudToken:       hcloudToken,
 		FirewallName:      firewallName,
@@ -70,6 +81,7 @@ func main() {
 		DiscoveryInterval: discoveryInterval,
 		LabelSelector:     labelSelector,
 		ServerNamePattern: serverNamePattern,
+		LoadBalancerNames: lbNames,
 	}
 
 	logger.Info("starting hetzner-firewall-operator",
@@ -77,6 +89,7 @@ func main() {
 		"reconcileInterval", cfg.ReconcileInterval,
 		"nodePortPublic", cfg.NodePortPublic,
 		"sshCIDRs", len(cfg.AllowSSHFrom),
+		"loadBalancerNames", cfg.LoadBalancerNames,
 	)
 
 	// Create Hetzner Cloud client

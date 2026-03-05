@@ -65,6 +65,13 @@ questions:
     default: "30s"
     group: "Operator"
 
+  - variable: operator.loadBalancerNames
+    label: Load Balancer Names
+    description: "Comma-separated Hetzner Cloud Load Balancer names. When set, HTTP/HTTPS (80/443) rules are restricted to their IPs instead of 0.0.0.0/0. LB IPs are resolved at runtime."
+    type: string
+    default: ""
+    group: "Operator"
+
   # --- Deployment ---
   - variable: imagePullSecrets
     label: Image Pull Secrets
