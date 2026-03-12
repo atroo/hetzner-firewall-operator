@@ -450,6 +450,77 @@ func TestBuildRulesWithLoadBalancers(t *testing.T) {
 	})
 }
 
+func TestNodeIPNetsWithFloatingIPs(t *testing.T) {
+	nodes := []NodeInfo{
+		{
+			Name:        "server-1",
+			IPv4:        net.ParseIP("1.2.3.4"),
+			FloatingIPs: []net.IP{net.ParseIP("10.0.0.50")},
+			IsServer:    true,
+		},
+		{
+			Name:     "worker-1",
+			IPv4:     net.ParseIP("5.6.7.8"),
+			IsServer: false,
+		},
+	}
+
+	t.Run("all nodes includes floating IPs", func(t *testing.T) {
+		nets := nodeIPNets(nodes, false)
+		// server-1 IPv4 + server-1 floating + worker-1 IPv4 = 3
+		if len(nets) != 3 {
+			t.Fatalf("expected 3 nets, got %d", len(nets))
+		}
+		// Check floating IP is present
+		found := false
+		for _, n := range nets {
+			if n.IP.Equal(net.ParseIP("10.0.0.50").To4()) {
+				found = true
+				ones, bits := n.Mask.Size()
+				if ones != 32 || bits != 32 {
+					t.Errorf("floating IP should be /32, got /%d", ones)
+				}
+			}
+		}
+		if !found {
+			t.Error("floating IP 10.0.0.50 not found in nets")
+		}
+	})
+
+	t.Run("server only includes floating IPs of servers", func(t *testing.T) {
+		nets := nodeIPNets(nodes, true)
+		// server-1 IPv4 + server-1 floating = 2
+		if len(nets) != 2 {
+			t.Fatalf("expected 2 nets, got %d", len(nets))
+		}
+	})
+
+	t.Run("IPv6 floating IP", func(t *testing.T) {
+		v6Nodes := []NodeInfo{
+			{
+				Name:        "server-1",
+				IPv4:        net.ParseIP("1.2.3.4"),
+				FloatingIPs: []net.IP{net.ParseIP("2001:db8::1")},
+				IsServer:    true,
+			},
+		}
+		nets := nodeIPNets(v6Nodes, false)
+		// primary IPv4 + floating IPv6 = 2
+		if len(nets) != 2 {
+			t.Fatalf("expected 2 nets, got %d", len(nets))
+		}
+		// Check the IPv6 floating IP is /128
+		for _, n := range nets {
+			if n.IP.To4() == nil {
+				ones, bits := n.Mask.Size()
+				if ones != 128 || bits != 128 {
+					t.Errorf("IPv6 floating IP should be /128, got /%d (bits=%d)", ones, bits)
+				}
+			}
+		}
+	})
+}
+
 func TestBuildRulesEmptyNodes(t *testing.T) {
 	c := &Client{cfg: config.Config{}}
 	rules := c.buildRules(nil, nil)

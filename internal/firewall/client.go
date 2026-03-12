@@ -15,11 +15,12 @@ import (
 
 // NodeInfo holds the IP addresses of a Kubernetes node.
 type NodeInfo struct {
-	Name       string
-	ServerID   int64
-	IPv4       net.IP
-	IPv6Net    *net.IPNet // /64 network assigned by Hetzner
-	IsServer   bool       // true if control-plane node
+	Name        string
+	ServerID    int64
+	IPv4        net.IP
+	IPv6Net     *net.IPNet // /64 network assigned by Hetzner
+	FloatingIPs []net.IP   // additional floating IPs assigned to this server
+	IsServer    bool       // true if control-plane node
 }
 
 // ServerResolver resolves Hetzner server IDs for nodes that don't have
@@ -179,12 +180,59 @@ func (c *Client) DiscoverLoadBalancerIPs(ctx context.Context) ([]net.IPNet, erro
 	return nets, nil
 }
 
+// DiscoverFloatingIPs fetches all floating IPs from Hetzner and enriches the
+// given nodes with any floating IPs assigned to them.
+func (c *Client) DiscoverFloatingIPs(ctx context.Context, nodes []NodeInfo) ([]NodeInfo, error) {
+	floatingIPs, err := c.hcloud.FloatingIP.All(ctx)
+	if err != nil {
+		return nodes, fmt.Errorf("list floating IPs from Hetzner API: %w", err)
+	}
+
+	if len(floatingIPs) == 0 {
+		return nodes, nil
+	}
+
+	// Build server ID → node index map
+	serverIdx := make(map[int64]int, len(nodes))
+	for i, n := range nodes {
+		if n.ServerID > 0 {
+			serverIdx[n.ServerID] = i
+		}
+	}
+
+	for _, fip := range floatingIPs {
+		if fip.Server == nil {
+			continue
+		}
+		idx, ok := serverIdx[fip.Server.ID]
+		if !ok {
+			continue
+		}
+		if fip.IP != nil {
+			c.logger.Info("discovered floating IP for server",
+				"server", nodes[idx].Name,
+				"serverID", fip.Server.ID,
+				"floatingIP", fip.IP.String(),
+			)
+			nodes[idx].FloatingIPs = append(nodes[idx].FloatingIPs, fip.IP)
+		}
+	}
+
+	return nodes, nil
+}
+
 // Reconcile computes the desired firewall rules from the current set of nodes
 // and applies them to the managed Hetzner firewall.
 func (c *Client) Reconcile(ctx context.Context, nodes []NodeInfo) error {
 	fw, err := c.EnsureFirewall(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Discover floating IPs and enrich nodes
+	nodes, err = c.DiscoverFloatingIPs(ctx, nodes)
+	if err != nil {
+		c.logger.Warn("failed to discover floating IPs, continuing without them", "error", err)
 	}
 
 	// Discover load balancer IPs if configured
@@ -331,6 +379,7 @@ func (c *Client) ensureAppliedToServers(ctx context.Context, fw *hcloud.Firewall
 }
 
 // nodeIPNets converts node IPs to /32 (v4) and /128 or /64 (v6) networks.
+// Floating IPs assigned to the node are included as well.
 func nodeIPNets(nodes []NodeInfo, serverOnly bool) []net.IPNet {
 	var nets []net.IPNet
 	for _, n := range nodes {
@@ -346,6 +395,19 @@ func nodeIPNets(nodes []NodeInfo, serverOnly bool) []net.IPNet {
 		if n.IPv6Net != nil {
 			// Use the /64 network that Hetzner assigns
 			nets = append(nets, *n.IPv6Net)
+		}
+		for _, fip := range n.FloatingIPs {
+			if fip.To4() != nil {
+				nets = append(nets, net.IPNet{
+					IP:   fip.To4(),
+					Mask: net.CIDRMask(32, 32),
+				})
+			} else {
+				nets = append(nets, net.IPNet{
+					IP:   fip,
+					Mask: net.CIDRMask(128, 128),
+				})
+			}
 		}
 	}
 	return nets
